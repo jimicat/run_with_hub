@@ -61,8 +61,8 @@ def align_gpx_with_video(video_path: str, gpx_path: str, offset_seconds: int = 0
     return aligned_data
 
 if __name__ == "__main__":
-    video_file = "video_data/DJI_20250916214848_0375_D.MP4"
-    gpx_file = "gpx_data/activity_20403771520.gpx"
+    video_file = "video/DJI_20250916215214_0376_D.MP4"
+    gpx_file = "gpx/activity_20403771520.gpx"
     offset = 0  # 如果需要人工修正，可以改这里
 
     aligned = align_gpx_with_video(video_file, gpx_file, offset)
