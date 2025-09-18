@@ -118,6 +118,54 @@ class GPXVideoOverlay:
 
         frame[y:y_end, x:x_end] = roi
         return frame
+    
+    def _draw_path(self, frame, t_idx):
+        """
+        在视频画面上绘制跑步路径小地图，并标记当前位置
+        """
+        h_frame, w_frame = frame.shape[:2]
+        data = self.gpx_data
+        lats = data["lats"]
+        lons = data["lons"]
+
+        # ==== 1. 归一化坐标到小地图区域 ====
+        min_lat, max_lat = np.min(lats), np.max(lats)
+        min_lon, max_lon = np.min(lons), np.max(lons)
+
+        # 小地图大小 (200x200 像素，右上角显示)
+        map_size = 200
+        margin = 20
+        map_x1, map_y1 = w_frame - map_size - margin, margin
+        map_x2, map_y2 = w_frame - margin, margin + map_size
+
+        # 避免除零
+        lat_range = max(max_lat - min_lat, 1e-6)
+        lon_range = max(max_lon - min_lon, 1e-6)
+
+        # 将经纬度映射到小地图区域
+        norm_x = (lons - min_lon) / lon_range
+        norm_y = (lats - min_lat) / lat_range
+        # 注意 Y 轴翻转（图像坐标是下大上小）
+        norm_y = 1.0 - norm_y  
+
+        pts = np.stack([
+            map_x1 + norm_x * map_size,
+            map_y1 + norm_y * map_size
+        ], axis=-1).astype(int)
+
+        # ==== 2. 绘制轨迹 ====
+        for i in range(1, len(pts)):
+            cv2.line(frame, tuple(pts[i-1]), tuple(pts[i]), (0, 255, 255), 2)
+
+        # ==== 3. 绘制当前位置 ====
+        cur_pt = tuple(pts[t_idx])
+        cv2.circle(frame, cur_pt, 6, (0, 0, 255), -1)  # 红色圆点
+
+        # ==== 4. 绘制小地图边框 ====
+        cv2.rectangle(frame, (map_x1, map_y1), (map_x2, map_y2), (255, 255, 255), 2)
+
+        return frame
+
 
     def _draw_hud(self, frame, t_idx):
         """
@@ -222,6 +270,9 @@ class GPXVideoOverlay:
             if i < len(elements) - 1:
                 current_x += element_widths[i] + avg_gap
         
+        # 在 HUD 绘制完成后，叠加跑步路径
+        frame = self._draw_path(frame, t_idx)
+        
         return frame
 
     def find_nearest_index(self, t):
@@ -273,4 +324,4 @@ class GPXVideoOverlay:
 if __name__ == "__main__":
     overlay_processor = GPXVideoOverlay(csv_path="aligned.csv")
     overlay_processor.process_video(
-        "video/DJI_20250916215214_0376_D.MP4", "004.mp4")
+        "video/DJI_20250916215214_0376_D.MP4", "output/004.mp4")
