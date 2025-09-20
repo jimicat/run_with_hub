@@ -7,6 +7,13 @@ import tempfile
 import json  # 用于处理 ffprobe 输出
 import gpxpy # 用于解析 GPX 文件
 
+# Optional Pillow import for custom TrueType fonts
+try:
+    from PIL import Image, ImageDraw, ImageFont
+    PIL_AVAILABLE = True
+except Exception:
+    PIL_AVAILABLE = False
+
 # 从 aligned.py 移植的函数
 def _get_video_start_time(video_path: str) -> datetime:
     """
@@ -75,7 +82,8 @@ class GPXVideoOverlay:
     """
 
     def __init__(self, gpx_path: str, video_path: str, offset_seconds: int = 0, 
-                 map_position="topright", map_scale=0.2, layout="default"):
+                 map_position="topright", map_scale=0.2, layout="default",
+                 font_path: str = None, base_font_size: int = 24):
         
         # 1. 加载全量 GPX 轨迹点
         self.gpx_points_full = _parse_gpx(gpx_path) 
@@ -90,9 +98,96 @@ class GPXVideoOverlay:
 
         self.icons = self._preload_icons()
         self.font = cv2.FONT_HERSHEY_SIMPLEX
+        # custom font support (Pillow TrueType). base_font_size is pixel size at base width (1280)
+        self.font_path = font_path
+        self.base_font_size = base_font_size if base_font_size is not None else 24
+        self._pil_font_cache = {}
+        self.use_pil = bool(self.font_path) and PIL_AVAILABLE
+        if self.font_path and not PIL_AVAILABLE:
+            print("Warning: Pillow not available; falling back to OpenCV built-in fonts for text rendering.")
         self.map_position = map_position
         self.map_scale = map_scale        
         self.layout = layout
+
+    def _get_pil_font(self, px_size: int):
+        """Return a PIL ImageFont instance for the requested pixel size, using a small cache."""
+        if not self.font_path:
+            return None
+        key = int(px_size)
+        if key in self._pil_font_cache:
+            return self._pil_font_cache[key]
+        try:
+            f = ImageFont.truetype(self.font_path, key)
+        except Exception:
+            try:
+                f = ImageFont.load_default()
+            except Exception:
+                f = None
+        self._pil_font_cache[key] = f
+        return f
+
+    def _compute_scale_params(self, w_frame: int):
+        base_width = 1280.0
+        scale = w_frame / base_width
+        # font size in pixels for PIL: scale the base font size by video scale
+        pil_font_px = max(8, int(self.base_font_size * scale))
+        # font_scale for OpenCV (keeps previous behaviour approximate)
+        font_scale = 1.0 * scale
+        thickness = max(1, int(2 * scale))
+        return scale, font_scale, thickness, pil_font_px
+
+    def _get_text_size(self, text: str, w_frame: int, thickness: int, font_scale: float, pil_px: int):
+        """Return (text_w, text_h). Uses PIL when enabled, else OpenCV."""
+        if self.use_pil and PIL_AVAILABLE:
+            font = self._get_pil_font(pil_px)
+            if font is not None:
+                try:
+                    # create a tiny temporary image to measure text
+                    im = Image.new("RGB", (10, 10))
+                    draw = ImageDraw.Draw(im)
+                    # textbbox available in Pillow to get accurate width/height
+                    if hasattr(draw, "textbbox"):
+                        bbox = draw.textbbox((0, 0), text, font=font, stroke_width=max(0, thickness-1))
+                        text_w = bbox[2] - bbox[0]
+                        text_h = bbox[3] - bbox[1]
+                        return text_w, text_h
+                    else:
+                        # fallback to textsize for older Pillow versions
+                        return draw.textsize(text, font=font)
+                except Exception:
+                    pass
+        # fallback to OpenCV measurement
+        (text_w, text_h), baseline = cv2.getTextSize(text, self.font, font_scale, thickness)
+        return text_w, text_h
+
+    def _put_text(self, frame, text: str, pos: tuple, color: tuple, thickness: int, font_scale: float, pil_px: int):
+        """Draw text on `frame` at `pos` (x,y_top) - top-left corner of text.
+        Uses PIL when enabled, else OpenCV. For OpenCV the y coordinate must be baseline,
+        so we convert top-left y to baseline using text height.
+        """
+        x, y_top = int(pos[0]), int(pos[1])
+        # Try PIL path first
+        if self.use_pil and PIL_AVAILABLE:
+            try:
+                img_pil = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                draw = ImageDraw.Draw(img_pil)
+                font = self._get_pil_font(pil_px)
+                if font is None:
+                    raise RuntimeError("Failed to load PIL font; falling back to OpenCV text rendering.")
+
+                color_rgb = (int(color[2]), int(color[1]), int(color[0])) if len(color) >= 3 else (255, 255, 255)
+                stroke = max(0, thickness - 1)
+                draw.text((x, y_top), text, font=font, fill=color_rgb, stroke_width=stroke, stroke_fill=(0,0,0))
+                frame[:] = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
+                return frame
+            except Exception:
+                pass
+
+        # fallback to OpenCV: compute baseline y from top-left y
+        (text_w, text_h), baseline = cv2.getTextSize(text, self.font, font_scale, thickness)
+        baseline_y = y_top + text_h
+        cv2.putText(frame, text, (x, baseline_y), self.font, font_scale, color, thickness)
+        return frame
 
 
     def _prepare_gpx_data(self, video_path: str, offset_seconds: int = 0):
@@ -173,30 +268,18 @@ class GPXVideoOverlay:
     def _draw_date(self, frame, gpx_time_iso):
         """单独在左上角绘制日期和时间"""
         h_frame, w_frame = frame.shape[:2]
-
-        base_width = 1280.0
-        scale = w_frame / base_width
+        scale, font_scale, thickness, pil_px = self._compute_scale_params(w_frame)
         icon_size = (int(40 * scale), int(40 * scale))
-        font_scale = 1.0 * scale
-        thickness = max(1, int(2 * scale))
         icon_text_gap = int(10 * scale)
 
         text = gpx_time_iso.strftime("%Y-%m-%d %H:%M:%S")
 
         margin = int(20 * scale)
-        # 左上角基准点
-        icon_x, icon_y = margin, margin
-
-        # 绘制日期图标
-        # self._overlay_icon(frame, "time", (icon_x, icon_y), icon_size)
-
-        # 绘制日期文本（紧随其右）
-        (text_w, text_h), _ = cv2.getTextSize(text, self.font, font_scale, thickness)
-        text_x = icon_x + icon_size[0] + icon_text_gap
-        text_y = icon_y + icon_size[1] // 2 + text_h // 2
-
-        cv2.putText(frame, text, (text_x, text_y),
-                    self.font, font_scale, (255, 255, 255), thickness)
+        # place date text at top-left margin
+        text_w, text_h = self._get_text_size(text, w_frame, thickness, font_scale, pil_px)
+        text_x = margin
+        text_y = margin
+        frame = self._put_text(frame, text, (text_x, text_y), (255, 255, 255), thickness, font_scale, pil_px)
 
         return frame
 
@@ -321,12 +404,9 @@ class GPXVideoOverlay:
 
     def _draw_hud(self, frame, t_idx):
         h_frame, w_frame = frame.shape[:2]
-        base_width = 1280.0
-        scale = w_frame / base_width
-    
+        scale, font_scale, thickness, pil_px = self._compute_scale_params(w_frame)
+
         icon_size = (int(40 * scale), int(40 * scale))
-        font_scale = 1.0 * scale
-        thickness = max(int(2 * scale), 1)
     
         # ***注意：这里必须使用 self.gpx_data_metrics（对齐后的数据）***
         data = self.gpx_data_metrics
@@ -338,15 +418,35 @@ class GPXVideoOverlay:
         current_dist_m = data["distances"][t_idx]
     
         # ---- 计算配速 (Pace) ----
+        # Use a sliding time window over the aligned GPX metrics to estimate recent pace.
         pace_str = "--:--"
-        if current_dist_m > 10 and current_time_sec > 0.5:
-            speed_mps = current_dist_m / current_time_sec
-            if speed_mps > 0.01: 
-                speed_kmh = speed_mps * 3.6 
-                pace_sec_per_km = 3600 / speed_kmh
-                pace_min = int(pace_sec_per_km // 60)
-                pace_sec = int(pace_sec_per_km % 60)
-                pace_str = f"{pace_min:02d}'{pace_sec:02d}\""
+        try:
+            times = data["times"]
+            distances = data["distances"]
+            # window in seconds to compute recent pace (tunable)
+            window_seconds = 10.0
+            # find the earliest index within the window
+            start_time = max(0.0, float(current_time_sec - window_seconds))
+            j = int(np.searchsorted(times, start_time, side='left'))
+
+            # ensure indices valid
+            if j < 0:
+                j = 0
+
+            delta_t = float(current_time_sec - times[j]) if len(times) > 0 else 0.0
+            delta_d = float(current_dist_m - distances[j]) if len(distances) > 0 else 0.0
+
+            # require a minimum distance and time to produce a stable pace
+            if delta_d > 5.0 and delta_t > 0.5:
+                speed_mps = delta_d / delta_t
+                if speed_mps > 0.01:
+                    speed_kmh = speed_mps * 3.6
+                    pace_sec_per_km = 3600.0 / speed_kmh
+                    pace_min = int(pace_sec_per_km // 60)
+                    pace_sec = int(pace_sec_per_km % 60)
+                    pace_str = f"{pace_min:02d}'{pace_sec:02d}\""
+        except Exception:
+            pace_str = "--:--"
     
         elements = [
             ("pace", pace_str, (255, 255, 255)),
@@ -355,39 +455,114 @@ class GPXVideoOverlay:
             ("cad", f"{cad*2:.0f}spm", (255, 255, 255)),
         ]
     
-        if self.layout == "default":
-            # ... (底部横向布局绘制逻辑保持不变)
+        if self.layout in ("default", "classic"):
+            # Classic HUD: semi-transparent bottom bar with subtle border
             bg_height = int(80 * scale)
-            overlay = np.zeros_like(frame, dtype=np.uint8)
-            cv2.rectangle(overlay, (0, h_frame - bg_height),
-                          (w_frame, h_frame), (0, 0, 0), -1)
-            frame = cv2.addWeighted(overlay, 0.4, frame, 0.6, 0)
+            # No background fill for HUD (transparent); keep a thin top border
+            cv2.line(frame, (0, h_frame - bg_height), (w_frame, h_frame - bg_height), (200, 200, 200), max(1, int(scale)))
+
             y_center_px = h_frame - bg_height // 2
             icon_text_gap = int(10 * scale)
-    
+
             element_widths = []
             for _, text, _ in elements:
-                (text_w, _), _ = cv2.getTextSize(text, self.font, font_scale, thickness)
+                text_w, _ = self._get_text_size(text, w_frame, thickness, font_scale, pil_px)
                 element_total_width = icon_size[0] + icon_text_gap + text_w
                 element_widths.append(element_total_width)
-    
+
             total_elements_width = sum(element_widths)
             padding_px = int(w_frame * 0.03)
             available_width = w_frame - 2 * padding_px
-            total_gap_width = available_width - total_elements_width
+            total_gap_width = max(0, available_width - total_elements_width)
             avg_gap = total_gap_width / (len(elements) - 1) if len(elements) > 1 else 0
-    
+
             current_x = float(padding_px)
             for i, (icon_name, text, text_color) in enumerate(elements):
                 icon_y = int(y_center_px - icon_size[1] / 2)
                 self._overlay_icon(frame, icon_name, (int(current_x), icon_y), icon_size)
-                (text_w, text_h), _ = cv2.getTextSize(text, self.font, font_scale, thickness)
+                text_w, text_h = self._get_text_size(text, w_frame, thickness, font_scale, pil_px)
                 text_x = int(current_x) + icon_size[0] + icon_text_gap
-                text_y = int(y_center_px + text_h / 2)
-                cv2.putText(frame, text, (text_x, text_y), self.font,
-                            font_scale, text_color, thickness)
+                # top-left y so text + icon share same vertical center
+                text_y = int(y_center_px - text_h // 2)
+                frame = self._put_text(frame, text, (text_x, text_y), text_color, thickness, font_scale, pil_px)
                 if i < len(elements) - 1:
                     current_x += element_widths[i] + avg_gap
+
+        elif self.layout == "scifi":
+            # Scifi HUD: darker translucent bar with per-element neon boxes and glow text
+            bg_height = int(90 * scale)
+            # No HUD background fill for scifi (keep per-element boxes only)
+
+            y_center_px = h_frame - bg_height // 2
+            icon_text_gap = int(12 * scale)
+
+            # compute element widths
+            element_widths = []
+            for _, text, _ in elements:
+                text_w, _ = self._get_text_size(text, w_frame, thickness, font_scale, pil_px)
+                element_total_width = icon_size[0] + icon_text_gap + text_w + int(12 * scale)
+                element_widths.append(element_total_width)
+
+            total_elements_width = sum(element_widths)
+            padding_px = int(w_frame * 0.04)
+            available_width = w_frame - 2 * padding_px
+            total_gap_width = max(0, available_width - total_elements_width)
+            avg_gap = total_gap_width / (len(elements) - 1) if len(elements) > 1 else 0
+
+            current_x = float(padding_px)
+            neon_color = (200, 255, 255)
+            for i, (icon_name, text, _) in enumerate(elements):
+                # draw subtle element background box
+                box_x1 = int(current_x)
+                box_y1 = int(y_center_px - icon_size[1] / 2 - int(6 * scale))
+                box_x2 = int(current_x + element_widths[i])
+                box_y2 = int(y_center_px + icon_size[1] / 2 + int(6 * scale))
+                cv2.rectangle(frame, (box_x1, box_y1), (box_x2, box_y2), (20, 30, 40), -1)
+                # light border
+                cv2.rectangle(frame, (box_x1, box_y1), (box_x2, box_y2), (40, 120, 140), max(1, int(scale)))
+
+                icon_y = int(y_center_px - icon_size[1] / 2)
+                self._overlay_icon(frame, icon_name, (int(current_x + int(6 * scale)), icon_y), icon_size)
+
+                text_w, text_h = self._get_text_size(text, w_frame, thickness, font_scale, pil_px)
+                text_x = int(current_x + int(6 * scale) + icon_size[0] + icon_text_gap)
+                text_y = int(y_center_px - text_h // 2)
+                # glow/shadow: draw dark offset then neon
+                shadow_offset = max(1, int(scale))
+                frame = self._put_text(frame, text, (text_x + shadow_offset, text_y + shadow_offset), (0, 0, 0), thickness + 1, font_scale, pil_px)
+                frame = self._put_text(frame, text, (text_x, text_y), neon_color, thickness, font_scale, pil_px)
+
+                if i < len(elements) - 1:
+                    current_x += element_widths[i] + avg_gap
+        elif self.layout in ("left", "leftbottom"):
+            # Left-bottom HUD: vertical stack along left side with semi-transparent panel
+            panel_width = int(260 * scale)
+            padding = int(12 * scale)
+            # panel box from left margin
+            panel_x1 = padding
+            panel_y2 = h_frame - padding
+            # compute panel height based on elements
+            total_h = 0
+            item_h = icon_size[1]
+            gap = int(8 * scale)
+            total_h = len(elements) * item_h + (len(elements) + 1) * gap
+            panel_y1 = panel_y2 - total_h - int(12 * scale)
+
+            # draw panel
+            # panel background removed (transparent)
+
+            cur_y = panel_y1 + gap
+            for icon_name, text, text_color in elements:
+                icon_x = panel_x1 + int(8 * scale)
+                icon_y = cur_y
+                self._overlay_icon(frame, icon_name, (icon_x, icon_y), icon_size)
+
+                text_w, text_h = self._get_text_size(text, w_frame, thickness, font_scale, pil_px)
+                text_x = icon_x + icon_size[0] + int(8 * scale)
+                text_y = icon_y + (icon_size[1] - text_h) // 2
+                frame = self._put_text(frame, text, (text_x, text_y), text_color, thickness, font_scale, pil_px)
+
+                cur_y += item_h + gap
     
         elif self.layout == "grid9":
             # ... (九宫格布局绘制逻辑保持不变)
@@ -399,11 +574,10 @@ class GPXVideoOverlay:
     
             for icon_name, text, text_color in elements:
                 self._overlay_icon(frame, icon_name, (x0 + padding, cur_y), icon_size)
-                (text_w, text_h), _ = cv2.getTextSize(text, self.font, font_scale, thickness)
+                text_w, text_h = self._get_text_size(text, w_frame, thickness, font_scale, pil_px)
                 text_x = x0 + padding + icon_size[0] + 10
-                text_y = cur_y + icon_size[1] // 2 + text_h // 2
-                cv2.putText(frame, text, (text_x, text_y), self.font,
-                            font_scale, text_color, thickness)
+                text_y = cur_y + (icon_size[1] - text_h) // 2
+                frame = self._put_text(frame, text, (text_x, text_y), text_color, thickness, font_scale, pil_px)
                 cur_y += icon_size[1] + padding
     
         # ---- 路径和日期保持绘制 ----
@@ -515,13 +689,15 @@ if __name__ == "__main__":
             offset_seconds=time_offset, 
             map_position="topright",
             map_scale=0.1,
-            layout="default"
+            layout="leftbottom",
+            font_path="font/Arial Bold.ttf",
+            base_font_size=24
         )
 
         overlay_processor.process_video(
             video_file,
             output_file,
-            max_duration=None  
+            max_duration=10  
         )
     except RuntimeError as e:
         print(f"\n--- Critical Error ---")
