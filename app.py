@@ -188,7 +188,7 @@ class GPXVideoOverlay:
         icon_x, icon_y = margin, margin
 
         # 绘制日期图标
-        self._overlay_icon(frame, "time", (icon_x, icon_y), icon_size)
+        # self._overlay_icon(frame, "time", (icon_x, icon_y), icon_size)
 
         # 绘制日期文本（紧随其右）
         (text_w, text_h), _ = cv2.getTextSize(text, self.font, font_scale, thickness)
@@ -302,7 +302,7 @@ class GPXVideoOverlay:
         # ==== 2. 绘制完整轨迹 ====
         # 使用完整的 pts 数组绘制轨迹
         for i in range(1, len(pts)):
-            cv2.line(frame, tuple(pts[i-1]), tuple(pts[i]), (0, 255, 255), 3)
+            cv2.line(frame, tuple(pts[i-1]), tuple(pts[i]), (255, 255, 255), 4)
 
         # ==== 3. 绘制当前位置 ====
         # 将视频对齐后的索引 t_idx 映射到完整路径的索引
@@ -315,7 +315,7 @@ class GPXVideoOverlay:
             return frame 
             
         cur_pt = tuple(pts[full_path_idx])
-        cv2.circle(frame, cur_pt, 6, (0, 0, 255), -1)  # 红色圆点
+        cv2.circle(frame, cur_pt, 6, (0, 0, 255), 8)  # 红色圆点
 
         return frame
 
@@ -351,8 +351,8 @@ class GPXVideoOverlay:
         elements = [
             ("pace", pace_str, (255, 255, 255)),
             ("alt", f"{ele:.1f}m", (255, 255, 255)),
-            ("hr", f"{hr:.0f}bpm" if hr > 0 else "--", (0, 255, 255) if hr > 0 else (255, 255, 255)),
-            ("cad", f"{cad*2:.0f}spm" if cad > 0 else "--", (0, 255, 255) if cad > 0 else (255, 255, 255)),
+            ("hr", f"{hr:.0f}bpm", (255, 255, 255)),
+            ("cad", f"{cad*2:.0f}spm", (255, 255, 255)),
         ]
     
         if self.layout == "default":
@@ -498,9 +498,9 @@ class GPXVideoOverlay:
 if __name__ == "__main__":
     # ----------------------------------------------------------------------
     # 路径配置
-    video_file = "video/DJI_20250916214343_0373_D.MP4"
-    gpx_file = "gpx/activity_20403771520.gpx"
-    output_file = "output/001_full_path_overlay.mp4"
+    video_file = "video/DJI_20250919222758_0385_D.MP4"
+    gpx_file = "gpx/activity_20435872278.gpx"
+    output_file = "output/002_full_path_overlay.mp4"
     time_offset = 0  # 如果需要人工修正，可以在这里设置偏移量（秒）
     # ----------------------------------------------------------------------
 
@@ -514,14 +514,14 @@ if __name__ == "__main__":
             video_path=video_file,
             offset_seconds=time_offset, 
             map_position="topright",
-            map_scale=0.2,
-            layout="grid9"
+            map_scale=0.1,
+            layout="default"
         )
 
         overlay_processor.process_video(
             video_file,
             output_file,
-            max_duration=10  
+            max_duration=None  
         )
     except RuntimeError as e:
         print(f"\n--- Critical Error ---")
