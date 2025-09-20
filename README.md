@@ -36,3 +36,18 @@ overlay_processor = GPXVideoOverlay(
 	layout="scifi",
 )
 ```
+
+Process All Videos
+------------------
+
+To process every video in a folder, point `video_file` to the directory. The script will output per-video files into the `output/` folder using the original base name with `_overlay.mp4` appended.
+
+Example (in `app.py`):
+
+```python
+video_file = "video/"  # a folder containing .mp4 files
+gpx_file = "gpx/activity_20435872278.gpx"
+output_file = "output/"
+```
+
+Or call `GPXVideoOverlay.process_all_videos(video_dir, gpx_path, out_dir, ...)` directly from other scripts.

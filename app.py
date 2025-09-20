@@ -668,13 +668,37 @@ class GPXVideoOverlay:
         
         os.remove(tmp_file_path)
 
+    @staticmethod
+    def process_all_videos(video_dir: str, gpx_path: str, out_dir: str, **kwargs):
+        """Process all video files in `video_dir`. For each video, create a GPXVideoOverlay and render.
+        `kwargs` are forwarded to GPXVideoOverlay constructor (e.g., layout, font_path).
+        """
+        supported_ext = (".mp4", ".mov", ".mkv", ".avi")
+        os.makedirs(out_dir, exist_ok=True)
+
+        for root, _, files in os.walk(video_dir):
+            for fn in sorted(files):
+                if not fn.lower().endswith(supported_ext):
+                    continue
+                video_path = os.path.join(root, fn)
+                # create output filename in out_dir using original name
+                base = os.path.splitext(fn)[0]
+                out_path = os.path.join(out_dir, f"{base}_overlay.mp4")
+
+                print(f"Processing {video_path} -> {out_path}")
+                try:
+                    overlay = GPXVideoOverlay(gpx_path=gpx_path, video_path=video_path, **kwargs)
+                    overlay.process_video(video_path, out_path)
+                except Exception as e:
+                    print(f"Error processing {video_path}: {e}")
+
 
 if __name__ == "__main__":
     # ----------------------------------------------------------------------
     # 路径配置
-    video_file = "video/DJI_20250919222758_0385_D.MP4"
+    video_file = "video/"
     gpx_file = "gpx/activity_20435872278.gpx"
-    output_file = "output/002_full_path_overlay.mp4"
+    output_file = "output/"
     time_offset = 0  # 如果需要人工修正，可以在这里设置偏移量（秒）
     # ----------------------------------------------------------------------
 
@@ -683,22 +707,36 @@ if __name__ == "__main__":
 
     try:
         # 实例化时进行数据加载、对齐和全路径准备
-        overlay_processor = GPXVideoOverlay(
-            gpx_path=gpx_file,
-            video_path=video_file,
-            offset_seconds=time_offset, 
-            map_position="topright",
-            map_scale=0.1,
-            layout="leftbottom",
-            font_path="font/Arial Bold.ttf",
-            base_font_size=24
-        )
+        # If video_file is a directory, process all videos inside it
+        if os.path.isdir(video_file):
+            GPXVideoOverlay.process_all_videos(
+                video_dir=video_file,
+                gpx_path=gpx_file,
+                out_dir=os.path.dirname(output_file) or "output",
+                offset_seconds=time_offset,
+                map_position="topright",
+                map_scale=0.1,
+                layout="leftbottom",
+                font_path="font/Arial Bold.ttf",
+                base_font_size=24
+            )
+        else:
+            overlay_processor = GPXVideoOverlay(
+                gpx_path=gpx_file,
+                video_path=video_file,
+                offset_seconds=time_offset, 
+                map_position="topright",
+                map_scale=0.1,
+                layout="leftbottom",
+                font_path="font/Arial Bold.ttf",
+                base_font_size=24
+            )
 
-        overlay_processor.process_video(
-            video_file,
-            output_file,
-            max_duration=10  
-        )
+            overlay_processor.process_video(
+                video_file,
+                output_file,
+                max_duration=None  
+            )
     except RuntimeError as e:
         print(f"\n--- Critical Error ---")
         print(e)
